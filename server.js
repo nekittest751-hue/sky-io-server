@@ -297,7 +297,82 @@ function getSpawnPoint(room) {
   return room.map.spawns[Math.floor(Math.random() * room.map.spawns.length)];
 }
 
-function createPlayer(room, id, rawName, clientVersion) {
+function createPlayer(room, id, rawName, clientVersion, deviceId) {
+  const spawn = getSpawnPoint(room);
+  const uniqueName = ensureUniqueName(room, rawName);
+
+  const normalizedDeviceId =
+    normalizeDeviceId(deviceId) ||
+    ('legacy_' + crypto.createHash('sha1').update(uniqueName).digest('hex').slice(0, 24));
+
+  const record = getDeviceRecord(normalizedDeviceId) || {
+    writeBlocked: false,
+    mutedUntil: 0,
+    strikes: 0,
+    profanityHits: 0
+  };
+
+  const chatRead = semverGte(clientVersion, MIN_CHAT_VERSION);
+
+  const player = {
+    id,
+    name: uniqueName,
+    x: spawn.x,
+    y: spawn.y,
+    w: 34,
+    h: 46,
+    vx: 0,
+    vy: 0,
+    speed: 0.78,
+    maxSpeed: 5.4,
+    jumpPower: 12.5,
+    friction: 0.82,
+    onGround: false,
+    facing: 1,
+    aimAngle: 0,
+    hp: 100,
+    score: 0,
+    kills: 0,
+    deaths: 0,
+    color: randomColor(),
+    dead: false,
+    respawnTimer: 0,
+    shootCooldown: 0,
+    weaponKey: 'pistol',
+    ammo: WEAPONS.pistol.ammo,
+    wantPickup: false,
+    deviceId: normalizedDeviceId,
+    input: {
+      left: false,
+      right: false,
+      jump: false,
+      shoot: false,
+      pickup: false,
+      aimX: 460,
+      aimY: 290
+    },
+    clientVersion: String(clientVersion || '0.0.0'),
+    chat: {
+      canRead: chatRead,
+      mutedUntil: Number(record.mutedUntil || 0),
+      sessionWriteLocked: !!record.writeBlocked,
+      strikes: Number(record.strikes || 0),
+      profanityHits: Number(record.profanityHits || 0),
+      recentTimestamps: [],
+      lastNormalized: '',
+      lastAt: 0
+    }
+  };
+
+  const existingRecord = getDeviceRecord(normalizedDeviceId);
+  if (existingRecord) {
+    existingRecord.lastName = uniqueName;
+    existingRecord.updatedAt = Date.now();
+    saveModerationStore();
+  }
+
+  return player;
+}
   const spawn = getSpawnPoint(room);
   const uniqueName = ensureUniqueName(room, rawName);
   const chatRead = semverGte(clientVersion, MIN_CHAT_VERSION);
