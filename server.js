@@ -3,72 +3,6 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
-const MODERATION_STORE_PATH = path.join(__dirname, 'moderation_store.json');
-
-function loadModerationStore() {
-  try {
-    if (!fs.existsSync(MODERATION_STORE_PATH)) {
-      return { devices: {} };
-    }
-    const raw = fs.readFileSync(MODERATION_STORE_PATH, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return { devices: {} };
-    if (!parsed.devices || typeof parsed.devices !== 'object') parsed.devices = {};
-    return parsed;
-  } catch {
-    return { devices: {} };
-  }
-}
-
-const moderationStore = loadModerationStore();
-
-function saveModerationStore() {
-  try {
-    fs.writeFileSync(MODERATION_STORE_PATH, JSON.stringify(moderationStore, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Failed to save moderation store:', err.message);
-  }
-}
-
-function normalizeDeviceId(deviceId) {
-  const clean = String(deviceId || '').trim();
-  if (!clean) return null;
-  if (!/^[a-zA-Z0-9_-]{8,120}$/.test(clean)) return null;
-  return clean;
-}
-
-function getDeviceRecord(deviceId) {
-  const id = normalizeDeviceId(deviceId);
-  if (!id) return null;
-  if (!moderationStore.devices[id]) {
-    moderationStore.devices[id] = {
-      writeBlocked: false,
-      mutedUntil: 0,
-      strikes: 0,
-      profanityHits: 0,
-      lastReason: '',
-      lastName: '',
-      updatedAt: 0
-    };
-  }
-  return moderationStore.devices[id];
-}
-
-function persistPlayerModeration(player, reason = '') {
-  const record = getDeviceRecord(player.deviceId);
-  if (!record) return;
-
-  record.writeBlocked = !!player.chat.sessionWriteLocked;
-  record.mutedUntil = Number(player.chat.mutedUntil || 0);
-  record.strikes = Number(player.chat.strikes || 0);
-  record.profanityHits = Number(player.chat.profanityHits || 0);
-  record.lastReason = reason || record.lastReason || '';
-  record.lastName = player.name || record.lastName || '';
-  record.updatedAt = Date.now();
-
-  saveModerationStore();
-}
-
 const PORT = process.env.PORT || 8080;
 const TICK_RATE = 1000 / 60;
 const SNAPSHOT_RATE = 1000 / 20;
@@ -80,6 +14,8 @@ const CHAT_HISTORY_LIMIT = 40;
 const SPAM_WINDOW_MS = 8000;
 const SPAM_LIMIT = 5;
 const TEMP_MUTE_MS = 5 * 60 * 1000;
+
+const STORE_PATH = path.join(__dirname, 'moderation_store.json');
 
 const WEAPONS = {
   pistol:  { name: 'Pistol',  damage: 16, ammo: 12, speed: 12, spread: 0.02, pellets: 1, cooldown: 20, color: '#fbbf24' },
@@ -182,6 +118,80 @@ const MAPS = {
 
 const PROFANITY_RE = /(бля|бляд|хуй|хуе|хуйня|пизд|еба|ёба|ебл|сук|мраз|fuck|shit|bitch|asshole)/giu;
 
+function loadStore() {
+  try {
+    if (!fs.existsSync(STORE_PATH)) {
+      return { devices: {} };
+    }
+    const raw = fs.readFileSync(STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { devices: {} };
+    if (!parsed.devices || typeof parsed.devices !== 'object') parsed.devices = {};
+    return parsed;
+  } catch {
+    return { devices: {} };
+  }
+}
+
+const moderationStore = loadStore();
+
+function saveStore() {
+  try {
+    fs.writeFileSync(STORE_PATH, JSON.stringify(moderationStore, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to save moderation store:', err.message);
+  }
+}
+
+function getOrCreateDeviceRecord(deviceKey) {
+  if (!moderationStore.devices[deviceKey]) {
+    moderationStore.devices[deviceKey] = {
+      writeBlocked: false,
+      mutedUntil: 0,
+      strikes: 0,
+      profanityHits: 0,
+      lastReason: '',
+      lastName: '',
+      updatedAt: 0
+    };
+  }
+  return moderationStore.devices[deviceKey];
+}
+
+function makeFingerprint(remoteAddress, userAgent) {
+  return crypto
+    .createHash('sha1')
+    .update(String(remoteAddress || '') + '|' + String(userAgent || ''))
+    .digest('hex');
+}
+
+function normalizeClientDeviceId(deviceId) {
+  const clean = String(deviceId || '').trim();
+  if (!clean) return null;
+  if (!/^[a-zA-Z0-9_-]{8,120}$/.test(clean)) return null;
+  return clean;
+}
+
+function buildDeviceKey(clientDeviceId, remoteAddress, userAgent) {
+  const normalized = normalizeClientDeviceId(clientDeviceId);
+  if (normalized) {
+    return 'client_' + normalized;
+  }
+  return 'fp_' + makeFingerprint(remoteAddress, userAgent);
+}
+
+function persistPlayerModeration(player, reason = '') {
+  const record = getOrCreateDeviceRecord(player.deviceKey);
+  record.writeBlocked = !!player.chat.sessionWriteLocked;
+  record.mutedUntil = Number(player.chat.mutedUntil || 0);
+  record.strikes = Number(player.chat.strikes || 0);
+  record.profanityHits = Number(player.chat.profanityHits || 0);
+  record.lastReason = reason || record.lastReason || '';
+  record.lastName = player.name || record.lastName || '';
+  record.updatedAt = Date.now();
+  saveStore();
+}
+
 const rooms = new Map();
 
 const server = http.createServer((req, res) => {
@@ -219,10 +229,7 @@ function randomColor() {
 }
 
 function semverToParts(v) {
-  return String(v || '0.0.0')
-    .split('.')
-    .slice(0, 3)
-    .map((n) => parseInt(n, 10) || 0);
+  return String(v || '0.0.0').split('.').slice(0, 3).map((n) => parseInt(n, 10) || 0);
 }
 
 function semverGte(a, b) {
@@ -297,22 +304,11 @@ function getSpawnPoint(room) {
   return room.map.spawns[Math.floor(Math.random() * room.map.spawns.length)];
 }
 
-function createPlayer(room, id, rawName, clientVersion, deviceId) {
+function createPlayer(room, id, rawName, clientVersion, deviceKey) {
   const spawn = getSpawnPoint(room);
   const uniqueName = ensureUniqueName(room, rawName);
-
-  const normalizedDeviceId =
-    normalizeDeviceId(deviceId) ||
-    ('legacy_' + crypto.createHash('sha1').update(uniqueName).digest('hex').slice(0, 24));
-
-  const record = getDeviceRecord(normalizedDeviceId) || {
-    writeBlocked: false,
-    mutedUntil: 0,
-    strikes: 0,
-    profanityHits: 0
-  };
-
   const chatRead = semverGte(clientVersion, MIN_CHAT_VERSION);
+  const deviceRecord = getOrCreateDeviceRecord(deviceKey);
 
   const player = {
     id,
@@ -341,7 +337,7 @@ function createPlayer(room, id, rawName, clientVersion, deviceId) {
     weaponKey: 'pistol',
     ammo: WEAPONS.pistol.ammo,
     wantPickup: false,
-    deviceId: normalizedDeviceId,
+    deviceKey,
     input: {
       left: false,
       right: false,
@@ -354,77 +350,21 @@ function createPlayer(room, id, rawName, clientVersion, deviceId) {
     clientVersion: String(clientVersion || '0.0.0'),
     chat: {
       canRead: chatRead,
-      mutedUntil: Number(record.mutedUntil || 0),
-      sessionWriteLocked: !!record.writeBlocked,
-      strikes: Number(record.strikes || 0),
-      profanityHits: Number(record.profanityHits || 0),
+      mutedUntil: Number(deviceRecord.mutedUntil || 0),
+      sessionWriteLocked: !!deviceRecord.writeBlocked,
+      strikes: Number(deviceRecord.strikes || 0),
+      profanityHits: Number(deviceRecord.profanityHits || 0),
       recentTimestamps: [],
       lastNormalized: '',
       lastAt: 0
     }
   };
 
-  const existingRecord = getDeviceRecord(normalizedDeviceId);
-  if (existingRecord) {
-    existingRecord.lastName = uniqueName;
-    existingRecord.updatedAt = Date.now();
-    saveModerationStore();
-  }
+  deviceRecord.lastName = player.name;
+  deviceRecord.updatedAt = Date.now();
+  saveStore();
 
   return player;
-}
-  const spawn = getSpawnPoint(room);
-  const uniqueName = ensureUniqueName(room, rawName);
-  const chatRead = semverGte(clientVersion, MIN_CHAT_VERSION);
-
-  return {
-    id,
-    name: uniqueName,
-    x: spawn.x,
-    y: spawn.y,
-    w: 34,
-    h: 46,
-    vx: 0,
-    vy: 0,
-    speed: 0.78,
-    maxSpeed: 5.4,
-    jumpPower: 12.5,
-    friction: 0.82,
-    onGround: false,
-    facing: 1,
-    aimAngle: 0,
-    hp: 100,
-    score: 0,
-    kills: 0,
-    deaths: 0,
-    color: randomColor(),
-    dead: false,
-    respawnTimer: 0,
-    shootCooldown: 0,
-    weaponKey: 'pistol',
-    ammo: WEAPONS.pistol.ammo,
-    wantPickup: false,
-    input: {
-      left: false,
-      right: false,
-      jump: false,
-      shoot: false,
-      pickup: false,
-      aimX: 460,
-      aimY: 290
-    },
-    clientVersion: String(clientVersion || '0.0.0'),
-    chat: {
-      canRead: chatRead,
-      mutedUntil: 0,
-      sessionWriteLocked: false,
-      strikes: 0,
-      profanityHits: 0,
-      recentTimestamps: [],
-      lastNormalized: '',
-      lastAt: 0
-    }
-  };
 }
 
 function rectsIntersect(a, b) {
@@ -437,7 +377,7 @@ function canPlayerWriteChat(player) {
 
 function chatWriteReason(player) {
   if (!player.chat.canRead) return `Обнови игру до версии ${MIN_CHAT_VERSION} для чата.`;
-  if (player.chat.sessionWriteLocked) return 'Ты переведен в режим только чтение за нарушения.';
+  if (player.chat.sessionWriteLocked) return 'На этом устройстве чат заблокирован за нарушения.';
   if (Date.now() < player.chat.mutedUntil) {
     const sec = Math.max(1, Math.ceil((player.chat.mutedUntil - Date.now()) / 1000));
     return `Писать в чат временно нельзя: ${sec} сек.`;
@@ -601,22 +541,26 @@ function broadcastSystemToRoom(room, text) {
 
 function applyModerationStrike(room, player, socket, reason) {
   player.chat.strikes += 1;
+  persistPlayerModeration(player, reason);
 
   if (player.chat.strikes >= 4) {
     player.chat.sessionWriteLocked = true;
-    sendSystemMessage(socket, 'Чат переведен в режим только чтение за повторные нарушения.');
+    persistPlayerModeration(player, 'permanent_write_block');
+    sendSystemMessage(socket, 'Чат переведен в режим только чтение на этом устройстве за повторные нарушения.');
     sendChatState(socket, player);
     return;
   }
 
   if (player.chat.strikes >= 2) {
     player.chat.mutedUntil = Date.now() + TEMP_MUTE_MS;
+    persistPlayerModeration(player, 'temporary_mute');
     sendSystemMessage(socket, `Чат временно ограничен за ${reason}.`);
     sendChatState(socket, player);
-  } else {
-    sendSystemMessage(socket, `Предупреждение: ${reason}.`);
-    sendChatState(socket, player);
+    return;
   }
+
+  sendSystemMessage(socket, `Предупреждение: ${reason}.`);
+  sendChatState(socket, player);
 }
 
 function handleChatMessage(room, player, socket, rawText) {
@@ -657,10 +601,13 @@ function handleChatMessage(room, player, socket, rawText) {
 
   if (hadProfanity) {
     player.chat.profanityHits += 1;
+    persistPlayerModeration(player, 'profanity');
     sendSystemMessage(socket, 'Мат в чате цензурируется автоматически.');
+
     if (player.chat.profanityHits >= 3) {
       player.chat.sessionWriteLocked = true;
-      sendSystemMessage(socket, 'За повторный мат чат переведен в режим только чтение.');
+      persistPlayerModeration(player, 'permanent_write_block_profanity');
+      sendSystemMessage(socket, 'За повторный мат чат переведен в режим только чтение на этом устройстве.');
       sendChatState(socket, player);
       return;
     }
@@ -973,6 +920,9 @@ server.on('upgrade', (req, socket) => {
 
   socket.write(headers.join('\r\n'));
 
+  const remoteAddress = req.socket.remoteAddress || '';
+  const userAgent = req.headers['user-agent'] || '';
+
   let room = null;
   let playerId = null;
   let closed = false;
@@ -1006,12 +956,20 @@ server.on('upgrade', (req, socket) => {
         room = getRoom(msg.room, msg.mapKey);
         playerId = makeId('p-');
 
-        const player = createPlayer(room, playerId, msg.name, msg.clientVersion);
+        const deviceKey = buildDeviceKey(msg.deviceId, remoteAddress, userAgent);
+        const player = createPlayer(room, playerId, msg.name, msg.clientVersion, deviceKey);
+
         room.players.set(playerId, player);
         room.sockets.set(playerId, socket);
 
         wsSend(socket, serializeWelcome(room, player));
         sendChatState(socket, player);
+
+        if (player.chat.sessionWriteLocked) {
+          sendSystemMessage(socket, 'Это устройство уже находится в режиме только чтение за прошлые нарушения.');
+        } else if (Date.now() < player.chat.mutedUntil) {
+          sendSystemMessage(socket, 'На этом устройстве еще действует временное ограничение чата.');
+        }
 
         if (player.chat.canRead) {
           wsSend(socket, { type: 'chatHistory', entries: room.chatHistory });
@@ -1054,6 +1012,7 @@ server.on('upgrade', (req, socket) => {
       if (msg.type === 'rename') {
         const oldName = player.name;
         player.name = ensureUniqueName(room, msg.name, player.id);
+        persistPlayerModeration(player, 'rename');
         wsSend(socket, { type: 'renamed', actualName: player.name });
         if (oldName !== player.name) {
           broadcastSystemToRoom(room, `${oldName} теперь известен как ${player.name}.`);
