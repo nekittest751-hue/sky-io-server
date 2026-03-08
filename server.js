@@ -1,5 +1,73 @@
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+const MODERATION_STORE_PATH = path.join(__dirname, 'moderation_store.json');
+
+function loadModerationStore() {
+  try {
+    if (!fs.existsSync(MODERATION_STORE_PATH)) {
+      return { devices: {} };
+    }
+    const raw = fs.readFileSync(MODERATION_STORE_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return { devices: {} };
+    if (!parsed.devices || typeof parsed.devices !== 'object') parsed.devices = {};
+    return parsed;
+  } catch {
+    return { devices: {} };
+  }
+}
+
+const moderationStore = loadModerationStore();
+
+function saveModerationStore() {
+  try {
+    fs.writeFileSync(MODERATION_STORE_PATH, JSON.stringify(moderationStore, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Failed to save moderation store:', err.message);
+  }
+}
+
+function normalizeDeviceId(deviceId) {
+  const clean = String(deviceId || '').trim();
+  if (!clean) return null;
+  if (!/^[a-zA-Z0-9_-]{8,120}$/.test(clean)) return null;
+  return clean;
+}
+
+function getDeviceRecord(deviceId) {
+  const id = normalizeDeviceId(deviceId);
+  if (!id) return null;
+  if (!moderationStore.devices[id]) {
+    moderationStore.devices[id] = {
+      writeBlocked: false,
+      mutedUntil: 0,
+      strikes: 0,
+      profanityHits: 0,
+      lastReason: '',
+      lastName: '',
+      updatedAt: 0
+    };
+  }
+  return moderationStore.devices[id];
+}
+
+function persistPlayerModeration(player, reason = '') {
+  const record = getDeviceRecord(player.deviceId);
+  if (!record) return;
+
+  record.writeBlocked = !!player.chat.sessionWriteLocked;
+  record.mutedUntil = Number(player.chat.mutedUntil || 0);
+  record.strikes = Number(player.chat.strikes || 0);
+  record.profanityHits = Number(player.chat.profanityHits || 0);
+  record.lastReason = reason || record.lastReason || '';
+  record.lastName = player.name || record.lastName || '';
+  record.updatedAt = Date.now();
+
+  saveModerationStore();
+}
 
 const PORT = process.env.PORT || 8080;
 const TICK_RATE = 1000 / 60;
